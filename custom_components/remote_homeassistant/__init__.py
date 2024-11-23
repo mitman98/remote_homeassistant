@@ -61,6 +61,7 @@ CONF_INSTANCES = "instances"
 CONF_SECURE = "secure"
 CONF_SUBSCRIBE_EVENTS = "subscribe_events"
 CONF_CALL_SERVICE_EVENTS_FILTER = "call_service_events_filter"
+CONF_DUMMY_SERVICES = "dummy_services"
 CONF_ENTITY_PREFIX = "entity_prefix"
 CONF_ENTITY_FRIENDLY_NAME_PREFIX = "entity_friendly_name_prefix"
 CONF_FILTER = "filter"
@@ -131,8 +132,9 @@ CONFIG_SCHEMA = vol.Schema(
         DOMAIN: vol.Schema(
             {
                 vol.Required(CONF_INSTANCES): vol.All(
-                    cv.ensure_list, [INSTANCES_SCHEMA]
+                    cv.ensure_list, [INSTANCES_SCHEMA],
                 ),
+                vol.Optional(CONF_DUMMY_SERVICES): cv.ensure_list,
             }
         ),
     },
@@ -203,6 +205,9 @@ async def _async_update_config_entry_if_from_yaml(hass, entries_by_id, conf):
 async def setup_remote_instance(hass: HomeAssistant.core.HomeAssistant):
     hass.http.register_view(DiscoveryInfoView())
 
+async def async_handle_empty(call):
+    """Handle the service call."""
+    return True
 
 async def async_setup(hass: HomeAssistant.core.HomeAssistant, config: ConfigType):
     """Set up the remote_homeassistant component."""
@@ -241,6 +246,13 @@ async def async_setup(hass: HomeAssistant.core.HomeAssistant, config: ConfigType
                 DOMAIN, context={"source": SOURCE_IMPORT}, data=instance
             )
         )
+
+    for dummy in config.get(DOMAIN, {}).get(CONF_DUMMY_SERVICES, []):
+        domain, service = split_entity_id(dummy)
+
+        hass.services.async_register(domain, service, async_handle_empty)
+
+        _LOGGER.info('registered dummy service: %s.%s', domain, service)
 
     return True
 
@@ -340,6 +352,7 @@ class RemoteConnection:
             config_entry.options.get(CONF_SUBSCRIBE_EVENTS, []) + INTERNALLY_USED_EVENTS
         )
         self._call_service_events_filter = config_entry.options.get(CONF_CALL_SERVICE_EVENTS_FILTER, [])
+        self._dummy_services = config_entry.options.get(CONF_DUMMY_SERVICES, [])
         self._entity_prefix = config_entry.options.get(
             CONF_ENTITY_PREFIX, "")
         self._entity_friendly_name_prefix = config_entry.options.get(
@@ -782,10 +795,10 @@ class RemoteConnection:
 
                 if f"{domain}.{service}" in self._call_service_events_filter:
                     try:
-                        _LOGGER.info("calling local service from remote service call: %s", event)
+                        _LOGGER.info("calling local service from %s remote service call: %s", self._entry.unique_id, event)
                         self._hass.async_create_task(self._hass.services.async_call(domain, service, service_data, blocking=False))
                     except Exception as err:
-                        _LOGGER.error("error calling local service from remote service call of %s: %s", event, err)
+                        _LOGGER.error("error calling local service from %s remote service call of %s: %s", self._entry.unique_id, event, err)
 
             else:
                 event = message["event"]
