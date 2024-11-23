@@ -60,6 +60,7 @@ PLATFORMS = ["sensor"]
 CONF_INSTANCES = "instances"
 CONF_SECURE = "secure"
 CONF_SUBSCRIBE_EVENTS = "subscribe_events"
+CONF_CALL_SERVICE_EVENTS_FILTER = "call_service_events_filter"
 CONF_ENTITY_PREFIX = "entity_prefix"
 CONF_ENTITY_FRIENDLY_NAME_PREFIX = "entity_friendly_name_prefix"
 CONF_FILTER = "filter"
@@ -114,10 +115,11 @@ INSTANCES_SCHEMA = vol.Schema(
             ],
         ),
         vol.Optional(CONF_SUBSCRIBE_EVENTS): cv.ensure_list,
+        vol.Optional(CONF_CALL_SERVICE_EVENTS_FILTER): cv.ensure_list,
         vol.Optional(CONF_ENTITY_PREFIX,
-            default=DEFAULT_ENTITY_PREFIX): cv.string,
+                     default=DEFAULT_ENTITY_PREFIX): cv.string,
         vol.Optional(CONF_ENTITY_FRIENDLY_NAME_PREFIX,
-            default=DEFAULT_ENTITY_FRIENDLY_NAME_PREFIX): cv.string,
+                     default=DEFAULT_ENTITY_FRIENDLY_NAME_PREFIX): cv.string,
         vol.Optional(CONF_LOAD_COMPONENTS): cv.ensure_list,
         vol.Required(CONF_SERVICE_PREFIX, default="remote_"): cv.string,
         vol.Optional(CONF_SERVICES): cv.ensure_list,
@@ -165,6 +167,7 @@ def async_yaml_to_config_entry(instance_conf):
     for option in [
         CONF_FILTER,
         CONF_SUBSCRIBE_EVENTS,
+        CONF_CALL_SERVICE_EVENTS_FILTER,
         CONF_ENTITY_PREFIX,
         CONF_ENTITY_FRIENDLY_NAME_PREFIX,
         CONF_LOAD_COMPONENTS,
@@ -226,10 +229,10 @@ async def async_setup(hass: HomeAssistant.core.HomeAssistant, config: ConfigType
     hass.async_create_task(setup_remote_instance(hass))
 
     async_register_admin_service(hass,
-        DOMAIN,
-        SERVICE_RELOAD,
-        _handle_reload,
-    )
+                                 DOMAIN,
+                                 SERVICE_RELOAD,
+                                 _handle_reload,
+                                 )
 
     instances = config.get(DOMAIN, {}).get(CONF_INSTANCES, [])
     for instance in instances:
@@ -336,6 +339,7 @@ class RemoteConnection:
         self._subscribe_events = set(
             config_entry.options.get(CONF_SUBSCRIBE_EVENTS, []) + INTERNALLY_USED_EVENTS
         )
+        self._call_service_events_filter = config_entry.options.get(CONF_CALL_SERVICE_EVENTS_FILTER, [])
         self._entity_prefix = config_entry.options.get(
             CONF_ENTITY_PREFIX, "")
         self._entity_friendly_name_prefix = config_entry.options.get(
@@ -364,9 +368,9 @@ class RemoteConnection:
 
     def _prefixed_entity_friendly_name(self, entity_friendly_name):
         if (self._entity_friendly_name_prefix
-            and entity_friendly_name.startswith(self._entity_friendly_name_prefix)
-            == False):
-            entity_friendly_name = (self._entity_friendly_name_prefix + 
+                and entity_friendly_name.startswith(self._entity_friendly_name_prefix)
+                == False):
+            entity_friendly_name = (self._entity_friendly_name_prefix +
                                     entity_friendly_name)
             return entity_friendly_name
         return entity_friendly_name
@@ -381,7 +385,7 @@ class RemoteConnection:
             url = baseURL + url
             return url
         return url
- 
+
     def set_connection_state(self, state):
         """Change current connection state."""
         signal = f"remote_homeassistant_{self._entry.unique_id}"
@@ -559,9 +563,9 @@ class RemoteConnection:
                 break
 
             if data.type in (
-                aiohttp.WSMsgType.CLOSE,
-                aiohttp.WSMsgType.CLOSED,
-                aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.CLOSING,
             ):
                 _LOGGER.debug("websocket connection is closing")
                 break
@@ -664,7 +668,7 @@ class RemoteConnection:
             data = {"id": _id, "type": event.event_type, **event_data}
 
             _LOGGER.debug("forward event: %s", data)
-            
+
             if self._connection is None:
                 _LOGGER.error("There is no remote connecion to send send data to")
                 return
@@ -684,9 +688,9 @@ class RemoteConnection:
                 return
 
             if (
-                (self._whitelist_e or self._whitelist_d)
-                and entity_id not in self._whitelist_e
-                and domain not in self._whitelist_d
+                    (self._whitelist_e or self._whitelist_d)
+                    and entity_id not in self._whitelist_e
+                    and domain not in self._whitelist_d
             ):
                 return
 
@@ -768,6 +772,21 @@ class RemoteConnection:
                 state = data["new_state"]["state"]
                 attr = data["new_state"]["attributes"]
                 state_changed(entity_id, state, attr)
+
+            elif message["event"]["event_type"] == "call_service":
+                event = message["event"]
+                data = event["data"]
+                domain = data["domain"]
+                service = data["service"]
+                service_data = data["service_data"]
+
+                if f"{domain}.{service}" in self._call_service_events_filter:
+                    try:
+                        _LOGGER.info("calling local service from remote service call: %s", event)
+                        self._hass.async_create_task(self._hass.services.async_call(domain, service, service_data, blocking=False))
+                    except Exception as err:
+                        _LOGGER.error("error calling local service from remote service call of %s: %s", event, err)
+
             else:
                 event = message["event"]
                 self._hass.bus.async_fire(
